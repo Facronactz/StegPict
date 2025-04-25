@@ -4,12 +4,13 @@
     <input type="file" id ="image" accept="image/*" @change="onImageChange">
     <input type="file" id ="archive" accept=".rar" @change="onArchiveChange">
   </div>
-  <button @click="process" :disabled="!image || !archive" >Process</button>
+  <button @click="handleClick" :disabled="!image || !archive" >Process</button>
 </template>
 
 <script setup>
-  import { ref } from 'vue'
-  const archive = ref(null)
+import {ref} from 'vue'
+
+const archive = ref(null)
   const image = ref(null)
   const status = ref("idle")
 
@@ -21,13 +22,14 @@
   const onImageChange = (event) => {
     image.value = event.target.files[0]
     image.value.fileType = image.value.type.split('/')[0]
+    image.value.imageType = image.value.type.split('/')[1]
   }
   const onArchiveChange = (event) => {
     archive.value = event.target.files[0]
     archive.value.fileType = archive.value.type.split('/')[1]
   }
 
-  const process = () => {
+  const handleClick = () => {
     status.value = "initializing"
     if(!image || !archive) {
       handleError("No file selected")
@@ -37,34 +39,34 @@
       handleError("Invalid file type")
       return;
     }
-    mergeFile(image.value, archive.value)
+    process(image.value, archive.value)
   }
 
-  const mergeFile = async (image, archive) => {
+  const process = async (image, archive) => {
     status.value = "processing"
+    const imageData = await readData(image)
+    const archiveData = await readData(archive)
+
+    const mergedFile = await mergeFile(imageData, archiveData)
+    downloadFile(mergedFile, `merged.${image.imageType}`)
+  }
+
+
+  const mergeFile = async (image, archive) => {
+    status.value = "merging"
     try {
-      const imageData = await readFile(image)
-      const archiveData = await readFile(archive)
-
-      status.value = "merging"
       // Merge buffers
-      const merged = new Uint8Array(imageData.byteLength + archiveData.byteLength)
-      merged.set(new Uint8Array(imageData), 0)
-      merged.set(new Uint8Array(archiveData), imageData.byteLength)
-      const blob = new Blob([merged], { type: image.type })
-
-      // Create downloadable file
-      status.value = "downloading"
-      downloadFile(blob, "merged.jpg")
-
-      status.value = "idle"
+      const merged = new Uint8Array(image.byteLength + archive.byteLength)
+      merged.set(new Uint8Array(image), 0)
+      merged.set(new Uint8Array(archive), image.byteLength)
+      return new Blob([merged], {type: image.type})
     } catch (err) {
       handleError(err)
     }
   }
 
-  const readFile = async (file) => {
-    status.value = "reading"
+  const readData = async (file) => {
+    status.value = "reading file"
     const reader = new FileReader()
     reader.readAsArrayBuffer(file)
     return new Promise((resolve, reject) => {
@@ -78,6 +80,7 @@
   }
 
   const downloadFile = (blob, fileName) => {
+    status.value = "downloading"
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url

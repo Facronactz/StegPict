@@ -21,14 +21,23 @@ export const readFile = ({file, targetProgress, progress}) => {
     })
 }
 
-export const mergeFiles = async ({imageData, archiveData}) => {
+export const mergeFiles = async ({imageData, archiveData, mergeOrder}) => {
     try {
-        const mergedArray = new Uint8Array(
-            imageData.data.byteLength + archiveData.data.byteLength
-        )
-        mergedArray.set(new Uint8Array(imageData.data), 0)
-        mergedArray.set(new Uint8Array(archiveData.data), imageData.data.byteLength)
-        return new Blob([mergedArray], {type: imageData.type})
+        if(mergeOrder === 'append') {
+            const mergedArray = new Uint8Array(
+                imageData.data.byteLength + archiveData.data.byteLength
+            )
+            mergedArray.set(new Uint8Array(imageData.data), 0)
+            mergedArray.set(new Uint8Array(archiveData.data), imageData.data.byteLength)
+            return new Blob([mergedArray], {type: imageData.type})
+        } else {
+            const mergedArray = new Uint8Array(
+                archiveData.data.byteLength + imageData.data.byteLength
+            )
+            mergedArray.set(new Uint8Array(archiveData.data), 0)
+            mergedArray.set(new Uint8Array(imageData.data), archiveData.data.byteLength)
+            return new Blob([mergedArray], {type: imageData.type})
+        }
     } catch (err) {
         throw new Error('Failed to merge files: ' + err.message)
     }

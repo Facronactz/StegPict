@@ -2,16 +2,20 @@
   <h1>Home</h1>
   <div>
     <input type="file" id ="image" accept="image/*" @change="onImageChange">
-    <input type="file" id ="archive" accept=".rar" @change="onArchiveChange">
+    <input type="file" id ="archive" accept=".rar" @change="onArchiveChange"><br>
+    <input aria-label="Output File Name" type="text" id="output" v-model="outputName">
   </div>
+  <span>{{ status }}</span>
   <button @click="handleClick" :disabled="!image || !archive" >Process</button>
 </template>
 
 <script setup>
-import {ref} from 'vue'
+  import {ref} from 'vue'
 
-const archive = ref(null)
+  const archive = ref(null)
   const image = ref(null)
+  const outputName = ref("merged")
+
   const status = ref("idle")
 
   const handleError = (err) => {
@@ -44,11 +48,24 @@ const archive = ref(null)
 
   const process = async (image, archive) => {
     status.value = "processing"
-    const imageData = await readData(image)
-    const archiveData = await readData(archive)
+    let imageData
+    let archiveData
 
+    try {
+      imageData = await readData(image, true)
+      archiveData = await readData(archive)
+    } catch (e) {
+      handleError(e.isPrototypeOf(String) ? e : "Failed to read file")
+      return
+    }
+
+    if(!imageData && !archiveData) {
+      handleError("Failed to process")
+      return
+    }
     const mergedFile = await mergeFile(imageData, archiveData)
-    downloadFile(mergedFile, `merged.${image.imageType}`)
+    downloadFile(mergedFile, `${outputName.value}.${image.imageType}`)
+    status.value = "idle"
   }
 
 
@@ -60,21 +77,28 @@ const archive = ref(null)
       merged.set(new Uint8Array(image), 0)
       merged.set(new Uint8Array(archive), image.byteLength)
       return new Blob([merged], {type: image.type})
-    } catch (err) {
-      handleError(err)
+    } catch (e) {
+      handleError( e.isPrototypeOf(String) ? e : "Failed to merge file")
     }
   }
 
-  const readData = async (file) => {
+  const readData = async (file, checkForArchive = false) => {
     status.value = "reading file"
     const reader = new FileReader()
     reader.readAsArrayBuffer(file)
     return new Promise((resolve, reject) => {
       reader.onload = () => {
+        if (checkForArchive) {
+          const result = reader.result
+          if (result.toString().includes("Rar!")){
+            reject("File already contains archive data")
+          }
+          resolve(result)
+        }
         resolve(reader.result)
       }
       reader.onerror = () => {
-        reject(reader.error)
+        reject(reader.error.message)
       }
     })
   }

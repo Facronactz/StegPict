@@ -228,6 +228,7 @@ import validateArchiveFile from "../helpers/validator/validateArchiveFile.js";
 import stripMetadata from "../services/StripMetadata.js";
 import {mergeFilesChunked, readFileChunked} from "../services/ChunkedProcessing.js";
 import {mergeFiles, readFile} from "../services/FileOperation.js";
+import {mergeFilePipeline, readFilePipeline} from "../services/ProcessPipeline.js";
 
 // Reactive state
 const archive = ref(null)
@@ -337,33 +338,33 @@ watch(embedWatermark, (val) => {
 // Web Worker Management
 let workerPool = ref([]);
 
-// const initializeWorkers = () => {
-//   // Cleanup existing workers
-//   workerPool.value.forEach(worker => worker.terminate());
-//
-//   // Create new pool
-//   workerPool.value = Array.from({length: workerPoolSize.value}, () =>
-//       new Worker(new URL('./file-worker.js', import.meta.url))
-//   );
-// };
+const initializeWorkers = () => {
+  // Cleanup existing workers
+  workerPool.value.forEach(worker => worker.terminate());
 
-// const processInParallel = async (imageData, archiveData) => {
-//   const chunkSize = Math.ceil(imageData.length / workerPool.length);
-//   const chunks = Array.from({length: workerPool.length}, (_, i) =>
-//       imageData.slice(i * chunkSize, (i + 1) * chunkSize)
-//   );
-//
-//   const results = await Promise.all(
-//       workerPool.map((worker, i) =>
-//           new Promise((resolve) => {
-//             worker.postMessage({chunk: chunks[i], index: i});
-//             worker.onmessage = (e) => resolve(e.data);
-//           })
-//       )
-//   );
-//
-//   return Buffer.concat(results);
-// };
+  // Create new pool
+  workerPool.value = Array.from({length: workerPoolSize.value}, () =>
+      new Worker(new URL('./file-worker.js', import.meta.url))
+  );
+};
+
+const processInParallel = async (imageData, archiveData) => {
+  const chunkSize = Math.ceil(imageData.length / workerPool.length);
+  const chunks = Array.from({length: workerPool.length}, (_, i) =>
+      imageData.slice(i * chunkSize, (i + 1) * chunkSize)
+  );
+
+  const results = await Promise.all(
+      workerPool.map((worker, i) =>
+          new Promise((resolve) => {
+            worker.postMessage({chunk: chunks[i], index: i});
+            worker.onmessage = (e) => resolve(e.data);
+          })
+      )
+  );
+
+  return Buffer.concat(results);
+};
 
 // File handlers
 const onImageChange = (event) => {
@@ -402,6 +403,10 @@ const handleClick = async () => {
     status.value = 'initializing'
     let [imageData, archiveData] = await readFilePipeline({
       isChunked: chunkedProcessing.value,
+      image: image.value,
+      archive: archive.value,
+      chunkSize: chunkSize.value,
+      progress,
     })
 
     if (checkForArchive.value && await isContainsArchiveData(imageData.data, archiveCheckLimit.value)) {
@@ -417,7 +422,8 @@ const handleClick = async () => {
     const mergedFile = await mergeFilePipeline({
       isChunked: chunkedProcessing.value,
       imageData,
-      archiveData
+      archiveData,
+      mergeOrder: mergeOrder.value
     })
 
     status.value = 'downloading'
@@ -433,60 +439,6 @@ const handleClick = async () => {
     showProgress.value = false
   }
 }
-
-const mergeFilePipeline = async ({isChunked = false, imageData, archiveData}) => {
-  if (isChunked) {
-    return await mergeFilesChunked({
-      imageData,
-      archiveData,
-      mergeOrder: mergeOrder.value
-    })
-  } else {
-    return await mergeFiles({
-      imageData,
-      archiveData
-    })
-  }
-}
-
-const readFilePipeline = async ({isChunked = false}) => {
-  try {
-    if (isChunked) {
-      const [imageData, archiveData] = await Promise.all([
-        readFileChunked({
-          file: image.value,
-          chunkSize: chunkSize.value,
-          targetProgress: 25,
-          progress,
-        }),
-        readFileChunked({
-          file: archive.value,
-          chunkSize: chunkSize.value,
-          targetProgress: 50,
-          progress,
-        })
-      ])
-      return [imageData, archiveData]
-    } else {
-      const [imageData, archiveData] = await Promise.all([
-        readFile({
-          file: image.value,
-          targetProgress: 25,
-          progress,
-        }),
-        readFile({
-          file: archive.value,
-          targetProgress: 50,
-          progress,
-        })
-      ])
-      return [imageData, archiveData]
-    }
-  } catch (err) {
-    throw new Error('Failed to read files: ' + err.message)
-  }
-}
-
 
 // Helpers
 const setError = (message) => {

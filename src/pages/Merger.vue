@@ -227,6 +227,7 @@ import validateImageFile from "../helpers/validator/validateImageFile.js";
 import validateArchiveFile from "../helpers/validator/validateArchiveFile.js";
 import stripMetadata from "../services/StripMetadata.js";
 import {mergeFilesChunked, readFileChunked} from "../services/ChunkedProcessing.js";
+import {mergeFiles, readFile} from "../services/FileOperation.js";
 
 // Reactive state
 const archive = ref(null)
@@ -318,7 +319,7 @@ watch(chunkSizeKB, (val) => {
 
 watch(parallelProcessing, (val) => {
   if (val) {
-    initializeWorkers();
+    initializeWorkers(workerPool);
   } else {
     workerPool.value.forEach(worker => worker.terminate());
     workerPool.value = [];
@@ -336,33 +337,33 @@ watch(embedWatermark, (val) => {
 // Web Worker Management
 let workerPool = ref([]);
 
-const initializeWorkers = () => {
-  // Cleanup existing workers
-  workerPool.value.forEach(worker => worker.terminate());
+// const initializeWorkers = () => {
+//   // Cleanup existing workers
+//   workerPool.value.forEach(worker => worker.terminate());
+//
+//   // Create new pool
+//   workerPool.value = Array.from({length: workerPoolSize.value}, () =>
+//       new Worker(new URL('./file-worker.js', import.meta.url))
+//   );
+// };
 
-  // Create new pool
-  workerPool.value = Array.from({length: workerPoolSize.value}, () =>
-      new Worker(new URL('./file-worker.js', import.meta.url))
-  );
-};
-
-const processInParallel = async (imageData, archiveData) => {
-  const chunkSize = Math.ceil(imageData.length / workerPool.length);
-  const chunks = Array.from({length: workerPool.length}, (_, i) =>
-      imageData.slice(i * chunkSize, (i + 1) * chunkSize)
-  );
-
-  const results = await Promise.all(
-      workerPool.map((worker, i) =>
-          new Promise((resolve) => {
-            worker.postMessage({chunk: chunks[i], index: i});
-            worker.onmessage = (e) => resolve(e.data);
-          })
-      )
-  );
-
-  return Buffer.concat(results);
-};
+// const processInParallel = async (imageData, archiveData) => {
+//   const chunkSize = Math.ceil(imageData.length / workerPool.length);
+//   const chunks = Array.from({length: workerPool.length}, (_, i) =>
+//       imageData.slice(i * chunkSize, (i + 1) * chunkSize)
+//   );
+//
+//   const results = await Promise.all(
+//       workerPool.map((worker, i) =>
+//           new Promise((resolve) => {
+//             worker.postMessage({chunk: chunks[i], index: i});
+//             worker.onmessage = (e) => resolve(e.data);
+//           })
+//       )
+//   );
+//
+//   return Buffer.concat(results);
+// };
 
 // File handlers
 const onImageChange = (event) => {
@@ -399,11 +400,9 @@ const handleClick = async () => {
     resetStatus()
     showProgress.value = true
     status.value = 'initializing'
-
-    let [imageData, archiveData] = await Promise.all([
-      readFileWithProgress(image.value, 0),
-      readFileWithProgress(archive.value, 50)
-    ])
+    let [imageData, archiveData] = await readFilePipeline({
+      isChunked: chunkedProcessing.value,
+    })
 
     if (checkForArchive.value && await isContainsArchiveData(imageData.data, archiveCheckLimit.value)) {
       throw new Error('Image already contains archive data')
@@ -415,7 +414,11 @@ const handleClick = async () => {
 
     status.value = 'merging'
     progress.value = 75
-    const mergedFile = await mergeFiles(imageData, archiveData)
+    const mergedFile = await mergeFilePipeline({
+      isChunked: chunkedProcessing.value,
+      imageData,
+      archiveData
+    })
 
     status.value = 'downloading'
     progress.value = 90
@@ -431,50 +434,59 @@ const handleClick = async () => {
   }
 }
 
-// File operations
-const readFileWithProgress = (file, targetProgress) => {
-  if (chunkedProcessing.value) return readFileChunked({
-    file,
-    chunkSize: chunkSize.value,
-    progress,
-  })
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-
-    reader.onprogress = (e) => {
-      if (e.lengthComputable) {
-        progress.value = targetProgress * (e.loaded / e.total)
-      }
-    }
-
-    reader.onload = () => resolve({
-      data: reader.result,
-      type: file.type,
-      name: file.name
+const mergeFilePipeline = async ({isChunked = false, imageData, archiveData}) => {
+  if (isChunked) {
+    return await mergeFilesChunked({
+      imageData,
+      archiveData,
+      mergeOrder: mergeOrder.value
     })
-
-    reader.onerror = () => reject(new Error(`Failed to read ${file.name}`))
-    reader.readAsArrayBuffer(file)
-  })
-}
-
-const mergeFiles = async (imageData, archiveData) => {
-  if (chunkedProcessing.value) return mergeFilesChunked({
-    imageData,
-    archiveData,
-    mergeOrder: mergeOrder.value
-  })
-  try {
-    const mergedArray = new Uint8Array(
-        imageData.data.byteLength + archiveData.data.byteLength
-    )
-    mergedArray.set(new Uint8Array(imageData.data), 0)
-    mergedArray.set(new Uint8Array(archiveData.data), imageData.data.byteLength)
-    return new Blob([mergedArray], {type: imageData.type})
-  } catch (err) {
-    throw new Error('Failed to merge files: ' + err.message)
+  } else {
+    return await mergeFiles({
+      imageData,
+      archiveData
+    })
   }
 }
+
+const readFilePipeline = async ({isChunked = false}) => {
+  try {
+    if (isChunked) {
+      const [imageData, archiveData] = await Promise.all([
+        readFileChunked({
+          file: image.value,
+          chunkSize: chunkSize.value,
+          targetProgress: 25,
+          progress,
+        }),
+        readFileChunked({
+          file: archive.value,
+          chunkSize: chunkSize.value,
+          targetProgress: 50,
+          progress,
+        })
+      ])
+      return [imageData, archiveData]
+    } else {
+      const [imageData, archiveData] = await Promise.all([
+        readFile({
+          file: image.value,
+          targetProgress: 25,
+          progress,
+        }),
+        readFile({
+          file: archive.value,
+          targetProgress: 50,
+          progress,
+        })
+      ])
+      return [imageData, archiveData]
+    }
+  } catch (err) {
+    throw new Error('Failed to read files: ' + err.message)
+  }
+}
+
 
 // Helpers
 const setError = (message) => {

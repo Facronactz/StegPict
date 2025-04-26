@@ -229,6 +229,7 @@ import stripMetadata from "../services/StripMetadata.js";
 import {mergeFilesChunked, readFileChunked} from "../services/ChunkedProcessing.js";
 import {mergeFiles, readFile} from "../services/FileOperation.js";
 import {mergeFilePipeline, readFilePipeline} from "../services/ProcessPipeline.js";
+import {initializeWorkers, processInParallel} from "../services/ParallelProcessing.js";
 
 // Reactive state
 const archive = ref(null)
@@ -261,6 +262,7 @@ const metadataSettings = ref({
 const enableCompression = ref(false);
 const watermarkText = ref('');
 const embedWatermark = ref(false);
+let workerPool = ref([]);
 
 // Computed properties
 const maxFileSize = computed(() => maxFileSizeMB.value * 1024 * 1024)
@@ -310,7 +312,7 @@ watch(archiveCheckLimitKB, (val) => {
 watch(workerPoolSize, (val) => {
   if (val < 1) workerPoolSize.value = 1;
   if (val > 16) workerPoolSize.value = 16;
-  initializeWorkers();
+  initializeWorkers({workerPool, workerPoolSize: workerPoolSize.value});
 });
 
 watch(chunkSizeKB, (val) => {
@@ -320,7 +322,7 @@ watch(chunkSizeKB, (val) => {
 
 watch(parallelProcessing, (val) => {
   if (val) {
-    initializeWorkers(workerPool);
+    initializeWorkers({workerPool, workerPoolSize: workerPoolSize.value});
   } else {
     workerPool.value.forEach(worker => worker.terminate());
     workerPool.value = [];
@@ -336,35 +338,34 @@ watch(embedWatermark, (val) => {
 });
 
 // Web Worker Management
-let workerPool = ref([]);
 
-const initializeWorkers = () => {
-  // Cleanup existing workers
-  workerPool.value.forEach(worker => worker.terminate());
+// const initializeWorkers = () => {
+//   // Cleanup existing workers
+//   workerPool.value.forEach(worker => worker.terminate());
+//
+//   // Create new pool
+//   workerPool.value = Array.from({length: workerPoolSize.value}, () =>
+//       new Worker(new URL('./file-worker.js', import.meta.url))
+//   );
+// };
 
-  // Create new pool
-  workerPool.value = Array.from({length: workerPoolSize.value}, () =>
-      new Worker(new URL('./file-worker.js', import.meta.url))
-  );
-};
-
-const processInParallel = async (imageData, archiveData) => {
-  const chunkSize = Math.ceil(imageData.length / workerPool.length);
-  const chunks = Array.from({length: workerPool.length}, (_, i) =>
-      imageData.slice(i * chunkSize, (i + 1) * chunkSize)
-  );
-
-  const results = await Promise.all(
-      workerPool.map((worker, i) =>
-          new Promise((resolve) => {
-            worker.postMessage({chunk: chunks[i], index: i});
-            worker.onmessage = (e) => resolve(e.data);
-          })
-      )
-  );
-
-  return Buffer.concat(results);
-};
+// const processInParallel = async (imageData, archiveData) => {
+//   const chunkSize = Math.ceil(imageData.length / workerPool.length);
+//   const chunks = Array.from({length: workerPool.length}, (_, i) =>
+//       imageData.slice(i * chunkSize, (i + 1) * chunkSize)
+//   );
+//
+//   const results = await Promise.all(
+//       workerPool.map((worker, i) =>
+//           new Promise((resolve) => {
+//             worker.postMessage({chunk: chunks[i], index: i});
+//             worker.onmessage = (e) => resolve(e.data);
+//           })
+//       )
+//   );
+//
+//   return Buffer.concat(results);
+// };
 
 // File handlers
 const onImageChange = (event) => {
@@ -401,6 +402,7 @@ const handleClick = async () => {
     resetStatus()
     showProgress.value = true
     status.value = 'initializing'
+
     let [imageData, archiveData] = await readFilePipeline({
       isChunked: chunkedProcessing.value,
       image: image.value,
@@ -417,18 +419,36 @@ const handleClick = async () => {
       imageData = await stripMetadata(new Blob([imageData], metadataSettings.value))
     }
 
-    status.value = 'merging'
-    progress.value = 75
-    const mergedFile = await mergeFilePipeline({
-      isChunked: chunkedProcessing.value,
-      imageData,
-      archiveData,
-      mergeOrder: mergeOrder.value
-    })
+    let mergedFile
+    if (parallelProcessing.value) {
+      status.value = 'processing'
+      progress.value = 75
+      if (workerPool.value.length === 0)
+        initializeWorkers({workerPool, workerPoolSize: workerPoolSize.value})
 
+      const mergedData = await processInParallel({
+        imageData: imageData.data,
+        archiveData: archiveData.data,
+        status,
+        workerPool: workerPool.value,
+        workerPoolSize: workerPoolSize.value,
+        mergeOrder: mergeOrder.value
+      })
+      mergedFile = new Blob([mergedData], {type: `image/${getFileExtension(outputFormat.value, customExtension.value, image.value)}`})
+    } else {
+      status.value = 'merging'
+      progress.value = 75
+      mergedFile = await mergeFilePipeline({
+        isChunked: chunkedProcessing.value,
+        imageData,
+        archiveData,
+        mergeOrder: mergeOrder.value
+      })
+    }
+    const resultFile = new Blob([mergedFile], {type: `image/${getFileExtension(outputFormat.value, customExtension.value, image.value)}`})
     status.value = 'downloading'
     progress.value = 90
-    await downloadFile(mergedFile, `${outputName.value}.${getFileExtension(outputFormat.value, customExtension.value, image.value)}`)
+    await downloadFile(resultFile, `${outputName.value}.${getFileExtension(outputFormat.value, customExtension.value, image.value)}`)
 
     status.value = 'success'
     progress.value = 100

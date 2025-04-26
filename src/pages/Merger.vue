@@ -7,7 +7,7 @@
         <h2>Input Files</h2>
 
         <div class="input-group">
-          <label for="image">Image File (JPEG/PNG):</label>
+          <label for="image">Image File</label>
           <div class="file-input">
             <input
                 type="file"
@@ -31,6 +31,16 @@
             <span class="file-name">{{ archive?.name || 'Select archive...' }}</span>
           </div>
         </div>
+
+        <div class="input-group">
+          <label class="checkbox-label">
+            <input
+                type="checkbox"
+                v-model="checkForArchive"
+            >
+            Check for existing archive data
+          </label>
+        </div>
       </div>
 
       <div class="form-section">
@@ -47,19 +57,29 @@
         </div>
 
         <div class="input-group">
-          <label class="checkbox-label">
-            <input
-                type="checkbox"
-                v-model="checkForArchive"
-            >
-            Check for existing archive data
-          </label>
+          <label>Output Format:</label>
+          <select v-model="outputFormat">
+            <option value="original">Original Image Format</option>
+            <option value="png">PNG</option>
+            <option value="jpg">JPG</option>
+            <option value="custom">Custom Binary</option>
+          </select>
+        </div>
+
+        <div class="input-group" v-if="outputFormat === 'custom'">
+          <label>Custom File Extension:</label>
+          <input
+              type="text"
+              v-model="customExtension"
+              placeholder="bin"
+          >
         </div>
       </div>
 
       <div class="form-section">
         <h2 @click="showAdvanced = !showAdvanced" class="section-toggle">
-          Advanced Settings ▼
+          Advanced Settings
+          <span class="arrow">{{ showAdvanced ? '▲' : '▼' }}</span>
         </h2>
 
         <div v-if="showAdvanced" class="advanced-settings">
@@ -67,8 +87,11 @@
           <div class="input-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="parallelProcessing">
-              Parallel Processing (Web Workers)
+              Enable Parallel Processing (Web Workers)
             </label>
+          </div>
+
+          <div class="input-group" v-if="parallelProcessing">
             <label>Worker Pool Size:</label>
             <input
                 type="number"
@@ -84,6 +107,16 @@
               <input type="checkbox" v-model="chunkedProcessing">
               Enable Chunked Processing
             </label>
+          </div>
+
+          <div class="input-group" v-if="chunkedProcessing">
+            <label>Chunk Size (KB):</label>
+            <input
+                type="number"
+                v-model.number="chunkSizeKB"
+                min="64"
+                max="4096"
+            >
           </div>
 
           <div class="input-group">
@@ -106,16 +139,6 @@
             >
           </div>
 
-          <div class="input-group" v-if="chunkedProcessing">
-            <label>Chunk Size (KB):</label>
-            <input
-                type="number"
-                v-model.number="chunkSizeKB"
-                min="64"
-                max="4096"
-            >
-          </div>
-
           <div class="input-group">
             <label>Merge Order:</label>
             <select v-model="mergeOrder">
@@ -124,47 +147,29 @@
             </select>
           </div>
 
-          <div class="input-group">
-            <label>Output Format:</label>
-            <select v-model="outputFormat">
-              <option value="original">Original Image Format</option>
-              <option value="png">PNG</option>
-              <option value="jpg">JPG</option>
-              <option value="custom">Custom Binary</option>
-            </select>
-          </div>
-
-          <div class="input-group" v-if="outputFormat === 'custom'">
-            <label>Custom File Extension:</label>
-            <input
-                type="text"
-                v-model="customExtension"
-                placeholder="bin"
-            >
-          </div>
-
           <!-- Forensic Watermarking -->
           <div class="input-group">
-            <label>Forensic Watermark:</label>
             <label class="checkbox-label">
               <input type="checkbox" v-model="embedWatermark">
-              Enable Steganographic Watermark
+              Enable Forensic Watermark
             </label>
+          </div>
+
+          <div class="input-group" v-if="embedWatermark">
             <input
                 type="text"
                 v-model="watermarkText"
                 placeholder="Enter watermark identifier"
-                :disabled="!embedWatermark"
             >
           </div>
 
           <!-- Metadata Removal -->
           <div class="input-group">
             <label class="checkbox-label">
-              <input type="checkbox" v-model="removeMetadata">
-              Remove Image Metadata:
+              <input type="checkbox" v-model="removeMetadata" disabled>
+              Remove Image Metadata
             </label>
-            <div class="checkbox-group">
+            <div class="checkbox-group" v-if="removeMetadata">
               <label class="checkbox-label">
                 <input type="checkbox" :disabled="!removeMetadata" v-model="metadataSettings.exif">
                 EXIF Data
@@ -213,8 +218,15 @@
 </template>
 
 <script setup>
-import {ref, computed, watch} from 'vue'
-import ExifReader from 'exifreader';
+import {computed, ref, watch} from 'vue'
+import createImagePreview from "../helpers/createImagePreview.js";
+import getFileExtension from "../helpers/getFileExtension.js";
+import downloadFile from "../services/DownloadResult.js";
+import isContainsArchiveData from "../helpers/isContainsArchiveData.js";
+import validateImageFile from "../helpers/validator/validateImageFile.js";
+import validateArchiveFile from "../helpers/validator/validateArchiveFile.js";
+import stripMetadata from "../services/StripMetadata.js";
+import {mergeFilesChunked, readFileChunked} from "../services/ChunkedProcessing.js";
 
 // Reactive state
 const archive = ref(null)
@@ -238,11 +250,11 @@ const chunkSizeKB = ref(512)
 const mergeOrder = ref('append')
 const outputFormat = ref('original')
 const customExtension = ref('bin')
-const removeMetadata = ref(true);
+const removeMetadata = ref(false);
 const metadataSettings = ref({
-  exif: true,
-  xmp: true,
-  iptc: true
+  exif: false,
+  xmp: false,
+  iptc: false
 });
 const enableCompression = ref(false);
 const watermarkText = ref('');
@@ -276,11 +288,11 @@ const statusMessage = computed(() => {
 const isProcessable = computed(() =>
     !!image.value &&
     !!archive.value &&
-    status.value !== 'processing' &&
+    !processing.value &&
     !error.value
 )
 
-const processing = computed(() => status.value === 'processing')
+const processing = computed(() => status.value !== 'idle')
 
 // Watch for invalid inputs
 watch(maxFileSizeMB, (val) => {
@@ -293,10 +305,32 @@ watch(archiveCheckLimitKB, (val) => {
   if (val > 10240) archiveCheckLimitKB.value = 10240
 })
 
-watch(workerPoolSize, (newVal) => {
-  if (newVal < 1) workerPoolSize.value = 1;
-  if (newVal > 16) workerPoolSize.value = 16;
+watch(workerPoolSize, (val) => {
+  if (val < 1) workerPoolSize.value = 1;
+  if (val > 16) workerPoolSize.value = 16;
   initializeWorkers();
+});
+
+watch(chunkSizeKB, (val) => {
+  if (val < 1) chunkSizeKB.value = 1
+  if (val > 8192) chunkSizeKB.value = 8192
+})
+
+watch(parallelProcessing, (val) => {
+  if (val) {
+    initializeWorkers();
+  } else {
+    workerPool.value.forEach(worker => worker.terminate());
+    workerPool.value = [];
+  }
+});
+
+watch(embedWatermark, (val) => {
+  if (val) {
+    watermarkText.value = 'StegPict by Facronactz';
+  } else {
+    watermarkText.value = '';
+  }
 });
 
 // Web Worker Management
@@ -307,21 +341,21 @@ const initializeWorkers = () => {
   workerPool.value.forEach(worker => worker.terminate());
 
   // Create new pool
-  workerPool.value = Array.from({ length: workerPoolSize.value }, () =>
+  workerPool.value = Array.from({length: workerPoolSize.value}, () =>
       new Worker(new URL('./file-worker.js', import.meta.url))
   );
 };
 
 const processInParallel = async (imageData, archiveData) => {
   const chunkSize = Math.ceil(imageData.length / workerPool.length);
-  const chunks = Array.from({ length: workerPool.length }, (_, i) =>
+  const chunks = Array.from({length: workerPool.length}, (_, i) =>
       imageData.slice(i * chunkSize, (i + 1) * chunkSize)
   );
 
   const results = await Promise.all(
       workerPool.map((worker, i) =>
           new Promise((resolve) => {
-            worker.postMessage({ chunk: chunks[i], index: i });
+            worker.postMessage({chunk: chunks[i], index: i});
             worker.onmessage = (e) => resolve(e.data);
           })
       )
@@ -333,47 +367,33 @@ const processInParallel = async (imageData, archiveData) => {
 // File handlers
 const onImageChange = (event) => {
   resetStatus()
+  imagePreview.value = null
+  image.value = null
   const file = event.target.files[0]
-  if (!validateImageFile(file)) return
+  if (!validateImageFile({
+    file,
+    maxFileSize: maxFileSize.value,
+    maxFileSizeMB: maxFileSizeMB.value,
+    setError,
+  })) return
   image.value = file
-  createImagePreview(file)
+  createImagePreview(file, imagePreview)
 }
 
 const onArchiveChange = (event) => {
   resetStatus()
+  archive.value = null
   const file = event.target.files[0]
-  if (!validateArchiveFile(file)) return
+  if (!validateArchiveFile({
+    file,
+    maxFileSize: maxFileSize.value,
+    maxFileSizeMB: maxFileSizeMB.value,
+    setError,
+  })) return
   archive.value = file
 }
 
-// Validation
-const validateImageFile = (file) => {
-  if (!file) return false
-  if (!file.type.startsWith('image/')) {
-    setError('Invalid image file type')
-    return false
-  }
-  if (file.size > maxFileSize.value) {
-    setError(`Image file exceeds ${maxFileSizeMB.value}MB limit`)
-    return false
-  }
-  return true
-}
-
-const validateArchiveFile = (file) => {
-  if (!file) return false
-  if (!file.name.toLowerCase().endsWith('.rar')) {
-    setError('Invalid archive file type')
-    return false
-  }
-  if (file.size > maxFileSize.value) {
-    setError(`Archive file exceeds ${maxFileSizeMB.value}MB limit`)
-    return false
-  }
-  return true
-}
-
-// Main processing
+// Main pipeline
 const handleClick = async () => {
   try {
     resetStatus()
@@ -385,12 +405,12 @@ const handleClick = async () => {
       readFileWithProgress(archive.value, 50)
     ])
 
-    if (checkForArchive.value && await containsArchiveData(imageData.data)) {
+    if (checkForArchive.value && await isContainsArchiveData(imageData.data, archiveCheckLimit.value)) {
       throw new Error('Image already contains archive data')
     }
 
     if (removeMetadata.value) {
-      imageData = await stripMetadata(new Blob([imageData]))
+      imageData = await stripMetadata(new Blob([imageData], metadataSettings.value))
     }
 
     status.value = 'merging'
@@ -399,7 +419,7 @@ const handleClick = async () => {
 
     status.value = 'downloading'
     progress.value = 90
-    await downloadFile(mergedFile, `${outputName.value}.${getFileExtension()}`)
+    await downloadFile(mergedFile, `${outputName.value}.${getFileExtension(outputFormat.value, customExtension.value, image.value)}`)
 
     status.value = 'success'
     progress.value = 100
@@ -413,6 +433,11 @@ const handleClick = async () => {
 
 // File operations
 const readFileWithProgress = (file, targetProgress) => {
+  if (chunkedProcessing.value) return readFileChunked({
+    file,
+    chunkSize: chunkSize.value,
+    progress,
+  })
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
 
@@ -433,56 +458,12 @@ const readFileWithProgress = (file, targetProgress) => {
   })
 }
 
-const containsArchiveData = async (arrayBuffer) => {
-  const bytes = new Uint8Array(arrayBuffer)
-  const signature = [82, 97, 114, 33] // "Rar!" ASCII codes
-
-  // Search first 1MB for performance
-  const searchLimit = Math.min(bytes.length, archiveCheckLimit.value)
-  for (let i = 0; i < searchLimit - 3; i++) {
-    if (bytes[i] === signature[0] &&
-        bytes[i + 1] === signature[1] &&
-        bytes[i + 2] === signature[2] &&
-        bytes[i + 3] === signature[3]) {
-      return true
-    }
-  }
-  return false
-}
-
-// Chunked processing implementation
-const readFileChunked = async (file) => {
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    const totalChunks = Math.ceil(file.size / chunkSize.value)
-    let chunksProcessed = 0
-
-    const readChunk = (offset) => {
-      const reader = new FileReader()
-      const chunk = file.slice(offset, offset + chunkSize.value)
-
-      reader.onload = (e) => {
-        chunks.push(e.target.result)
-        chunksProcessed++
-        progress.value = (chunksProcessed / totalChunks) * 50
-
-        if (offset + chunkSize.value < file.size) {
-          readChunk(offset + chunkSize.value)
-        } else {
-          resolve(chunks)
-        }
-      }
-
-      reader.onerror = reject
-      reader.readAsArrayBuffer(chunk)
-    }
-
-    readChunk(0)
-  })
-}
-
 const mergeFiles = async (imageData, archiveData) => {
-  if (chunkedProcessing.value) return mergeFilesChunked(imageData, archiveData)
+  if (chunkedProcessing.value) return mergeFilesChunked({
+    imageData,
+    archiveData,
+    mergeOrder: mergeOrder.value
+  })
   try {
     const mergedArray = new Uint8Array(
         imageData.data.byteLength + archiveData.data.byteLength
@@ -495,74 +476,7 @@ const mergeFiles = async (imageData, archiveData) => {
   }
 }
 
-const mergeFilesChunked = async (imageData, archiveData) => {
-  const mergedBlob = new Blob(
-      mergeOrder.value === 'append'
-          ? [imageData.data, archiveData.data]
-          : [archiveData.data, imageData.data],
-      {type: imageData.type}
-  )
-  return mergedBlob
-}
-
-const downloadFile = (blob, fileName) => {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = fileName
-    document.body.appendChild(link)
-    link.click()
-    setTimeout(() => {
-      document.body.removeChild(link)
-      URL.revokeObjectURL(url)
-      resolve()
-    }, 100)
-  })
-}
-
-// Metadata Removal
-const stripMetadata = async (imageFile) => {
-  const tags = ExifReader.load(imageFile);
-  const img = new Image();
-  img.src = URL.createObjectURL(imageFile);
-
-  img.onerror = () => {
-    throw new Error('Failed to load image');
-  };
-  return new Promise((resolve) => {
-    img.onload = () => {
-      if (!tags || !tags.exif) {
-        resolve(imageFile);
-        return;
-      }
-      delete tags.exif;
-      if (tags.gps) {
-        delete tags.gps;
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      canvas.toBlob(resolve, imageFile.type);
-    };
-  });
-};
-
 // Helpers
-const getFileExtension = () => {
-  if (outputFormat.value === 'custom') return customExtension.value
-  if (outputFormat.value !== 'original') return outputFormat.value
-  return image.value.name.split('.').pop().toLowerCase()
-}
-
-const createImagePreview = (file) => {
-  const reader = new FileReader()
-  reader.onload = (e) => imagePreview.value = e.target.result
-  reader.readAsDataURL(file)
-}
-
 const setError = (message) => {
   error.value = message
   status.value = 'error'
@@ -649,11 +563,48 @@ label {
 }
 
 input[type="text"] {
-  width: 80%;
+  width: 85%;
   padding: 0.75rem;
   border: 2px solid #e2e8f0;
   border-radius: 6px;
   font-size: 1rem;
+}
+
+select {
+  box-sizing: content-box;
+  width: 85%;
+  padding: 0.75rem;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+
+input[type="checkbox"] {
+  margin-right: 0.5rem;
+}
+
+input[type="number"] {
+  width: 85%;
+  padding: 0.75rem;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+
+input:disabled {
+  background: #f7fafc;
+  color: #a0aec0;
+  cursor: not-allowed;
+  pointer-events: none;
+  opacity: 0.5;
+  transition: opacity 0.2s;
+  border-radius: 6px;
+  border: 2px solid #e2e8f0;
+}
+
+.section-toggle {
+  margin-bottom: 1rem;
+  cursor: pointer;
 }
 
 .checkbox-label {
@@ -682,9 +633,6 @@ input[type="text"] {
   padding: 1rem;
   border-radius: 6px;
   margin-top: 1rem;
-}
-
-.status-idle {
   background: #e2e8f0;
   color: #4a5568;
 }

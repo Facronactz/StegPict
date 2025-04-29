@@ -19,31 +19,25 @@ export const processInParallel = async ({imageData, archiveData, status, workerP
     try {
         status.value = 'merging';
 
-        // Determine which file is larger
-        const largerFile = imageData.byteLength > archiveData.byteLength
-            ? {data: imageData, name: 'image'}
-            : {data: archiveData, name: 'archive'};
-
-        const smallerFile = largerFile.name === 'image'
-            ? archiveData
-            : imageData;
+        // Determine merge order and target files
+        const { mainFile, secondaryFile } = imageData.byteLength > archiveData.byteLength
+            ? { mainFile: imageData, secondaryFile: archiveData }
+            : { mainFile: archiveData, secondaryFile: imageData };
 
         const totalChunks = workerPoolSize;
-        const chunkSize = Math.ceil(largerFile.data.byteLength / totalChunks);
+        const chunkSize = Math.ceil(mainFile.byteLength / totalChunks);
 
-        // Prepare work units
+        // Split MAIN file only
         const workUnits = Array.from({length: totalChunks}, (_, i) => {
             const start = i * chunkSize;
             const end = start + chunkSize;
             return {
-                chunk: largerFile.data.slice(start, end),
-                fullFile: smallerFile,
-                mergeOrder: largerFile.name === 'image' ? mergeOrder : reverseMergeOrder(mergeOrder),
+                chunk: mainFile.slice(start, end),
                 index: i
             };
         });
 
-        // Distribute work to workers
+        // Process chunks in parallel (no merging in workers)
         const results = await Promise.all(
             workUnits.map((unit, idx) => {
                 const worker = workerPool[idx % workerPoolSize];
@@ -52,27 +46,37 @@ export const processInParallel = async ({imageData, archiveData, status, workerP
                         if (e.data.error) reject(e.data.error);
                         resolve(e.data.result);
                     };
-                    worker.postMessage(unit, [unit.chunk]);
+                    // Send only the chunk to workers
+                    worker.postMessage({ chunk: unit.chunk, index: unit.index });
                 });
             })
         );
 
-        // Reassemble final file
-        const merged = new Uint8Array(
-            results.reduce((acc, cur) => acc + cur.byteLength, 0)
-        );
-
+        // Reassemble MAIN file from chunks
+        const mainReconstructed = new Uint8Array(mainFile.byteLength);
         let offset = 0;
-        for (const buffer of results.sort((a, b) => a.index - b.index)) {
-            merged.set(new Uint8Array(buffer), offset);
+        results.sort((a, b) => a.index - b.index).forEach(buffer => {
+            mainReconstructed.set(new Uint8Array(buffer), offset);
             offset += buffer.byteLength;
-        }
+        });
 
-        // return merged.buffer;
-        return Buffer.from(merged);
+        // Merge with secondary file ONCE
+        const finalMerged = mergeOrder === 'append'
+            ? concatArrays(mainReconstructed, secondaryFile)
+            : concatArrays(secondaryFile, mainReconstructed);
+
+        return finalMerged.buffer;
     } catch (error) {
         throw new Error(`Parallel processing failed: ${error.message}`);
     }
+};
+
+// Helper to concatenate Uint8Arrays
+const concatArrays = (a, b) => {
+    const merged = new Uint8Array(a.byteLength + b.byteLength);
+    merged.set(a, 0);
+    merged.set(b, a.byteLength);
+    return merged;
 };
 
 // Helper function to reverse merge order
